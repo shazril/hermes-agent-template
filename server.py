@@ -1199,6 +1199,8 @@ def _verify_auth_token(token: str) -> bool:
 
 
 def _is_authenticated(request: Request) -> bool:
+    # WebSocket connections pass a WebSocket (HTTPConnection subclass) — it
+    # carries .cookies the same way, so accept either type here.
     return _verify_auth_token(request.cookies.get(COOKIE_NAME, ""))
 
 
@@ -2989,7 +2991,32 @@ async def _ws_serve_proxy(websocket: WebSocket) -> None:
     Order matters (mirrors ws_proxy): connect upstream BEFORE accepting the
     client, so an upstream rejection surfaces as a meaningful close code
     instead of accept-then-instant-drop.
+
+    Edge auth: the Desktop does NOT hold our admin cookie, but it authenticates
+    with the HERMES_DASHBOARD_SESSION_TOKEN it was given. Accept either (a) a
+    valid edge cookie, or (b) the session token via ?token= query param,
+    X-Hermes-Session-Token header, or Authorization: Bearer. Without one of
+    these, /gateway would be an unauthenticated public API — never ship it
+    open.
     """
+    # Edge auth FIRST — reject before any upstream connection.
+    edge_ok = _is_authenticated(websocket)
+    if not edge_ok:
+        token = (
+            websocket.query_params.get("token", "")
+            or websocket.headers.get("x-hermes-session-token", "")
+        )
+        if not token:
+            authz = websocket.headers.get("authorization", "")
+            if authz.lower().startswith("bearer "):
+                token = authz[7:].strip()
+        serve_token = os.environ.get("HERMES_DASHBOARD_SESSION_TOKEN", "")
+        if serve_token and token and _hmac.compare_digest(token.encode(), serve_token.encode()):
+            edge_ok = True
+    if not edge_ok:
+        await websocket.close(code=4401)
+        return
+
     path = websocket.url.path
     qs = websocket.url.query or ""
     # Strip /gateway prefix so serve sees its native path
@@ -3055,8 +3082,34 @@ async def _ws_serve_proxy(websocket: WebSocket) -> None:
                 pass
 
 
+def _gateway_edge_auth(request: Request) -> bool:
+    """Shared edge auth for /gateway/*: admin cookie OR the session token.
+
+    The Desktop holds no admin cookie but does know
+    HERMES_DASHBOARD_SESSION_TOKEN (via Session token auth in the connection
+    editor). Accept it from ?token=, the X-Hermes-Session-Token header, or an
+    Authorization: Bearer header. Fails closed when the env token is unset.
+    """
+    if _is_authenticated(request):
+        return True
+    token = request.query_params.get("token", "") or request.headers.get(
+        "x-hermes-session-token", "")
+    if not token:
+        authz = request.headers.get("authorization", "")
+        if authz.lower().startswith("bearer "):
+            token = authz[7:].strip()
+    serve_token = os.environ.get("HERMES_DASHBOARD_SESSION_TOKEN", "")
+    if not serve_token or not token:
+        return False
+    return _hmac.compare_digest(token.encode(), serve_token.encode())
+
+
 async def gw_serve_route_proxy(request: Request) -> Response:
     """Catch-all: forward /gateway/* requests to the hermes serve backend."""
+    # Edge auth (see _gateway_edge_auth) — 401 before touching the upstream.
+    if not _gateway_edge_auth(request):
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
     # Strip the /gateway prefix so serve gets its expected paths
     path = request.url.path
     stripped = path[len("/gateway"):] or "/"
