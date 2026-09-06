@@ -2978,10 +2978,18 @@ async def _ws_serve_proxy(websocket: WebSocket) -> None:
     Same pump pattern as ws_proxy() for the dashboard, but targets the serve
     subprocess on port HERMES_SERVE_PORT. Strips the /gateway prefix so serve
     sees its native paths (/api/pty, /api/ws, etc.).
-    """
-    # Accept the upgrade from the client
-    await websocket.accept()
 
+    Auth: serve gates /api/* behind the same basic-auth provider the template
+    configures for the dashboard. The Desktop authenticates its WS upgrade via
+    session cookie (set by the login POST through our HTTP proxy) and/or the
+    X-Hermes-Session-Token header — forward those on the upstream handshake,
+    or serve rejects the upgrade and the Desktop reports
+    "live WebSocket connection failed" even though our edge accepted it.
+
+    Order matters (mirrors ws_proxy): connect upstream BEFORE accepting the
+    client, so an upstream rejection surfaces as a meaningful close code
+    instead of accept-then-instant-drop.
+    """
     path = websocket.url.path
     qs = websocket.url.query or ""
     # Strip /gateway prefix so serve sees its native path
@@ -2990,6 +2998,14 @@ async def _ws_serve_proxy(websocket: WebSocket) -> None:
     if qs:
         upstream_url = f"{upstream_url}?{qs}"
 
+    # Forward only the credential-bearing headers. Everything else (Origin,
+    # Sec-WebSocket-*, Host) is either forbidden in websockets.connect or
+    # would trip serve's Host/origin guards.
+    fwd_headers = {
+        k: v for k, v in websocket.headers.items()
+        if k.lower() in ("cookie", "authorization", "x-hermes-session-token")
+    }
+
     try:
         upstream = await websockets.connect(
             upstream_url,
@@ -2997,22 +3013,46 @@ async def _ws_serve_proxy(websocket: WebSocket) -> None:
             ping_interval=None,  # loopback hop — don't poll
             ping_timeout=None,
             max_size=HERMES_WS_MAX_BYTES,
+            extra_headers=fwd_headers,
         )
-        asyncio.create_task(_ws_pump_client_to_upstream(websocket, upstream))
-        await _ws_pump_upstream_to_client(upstream, websocket)
-    except websockets.exceptions.InvalidHandshake:
-        await websocket.close(code=503)
-    except Exception as e:
-        print(f"[gw-serve-ws] proxy error: {e!r}", flush=True)
-        try:
-            await websocket.close(code=1011)
-        except Exception:
-            pass
+    except websockets.exceptions.InvalidStatus as e:
+        # serve rejected the handshake (bad/missing credentials). 4401 mirrors
+        # ws_proxy's unauthenticated close so the Desktop shows an auth error
+        # rather than a generic transport failure.
+        print(f"[gw-serve-ws] upstream rejected handshake for {path}: {e!r}", flush=True)
+        await websocket.close(code=4401)
+        return
+    except (asyncio.TimeoutError, OSError, websockets.exceptions.WebSocketException) as e:
+        print(f"[gw-serve-ws] upstream connect failed for {path}: {e!r}", flush=True)
+        await websocket.close(code=1011)
+        return
+
+    # Upstream is live — now accept and start pumping.
+    await websocket.accept()
+    pump_in = asyncio.create_task(_ws_pump_client_to_upstream(websocket, upstream))
+    pump_out = asyncio.create_task(_ws_pump_upstream_to_client(upstream, websocket))
+
+    try:
+        done, pending = await asyncio.wait(
+            (pump_in, pump_out),
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in pending:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
     finally:
         try:
-            await websocket.close()
+            await upstream.close()
         except Exception:
             pass
+        if websocket.client_state == WebSocketState.CONNECTED:
+            try:
+                await websocket.close()
+            except Exception:
+                pass
 
 
 async def gw_serve_route_proxy(request: Request) -> Response:
