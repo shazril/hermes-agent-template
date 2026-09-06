@@ -3103,14 +3103,37 @@ async def _ws_serve_proxy(websocket: WebSocket) -> None:
                 pass
 
 
+# Paths hermes itself leaves public behind its own gate (dashboard_auth/
+# public_paths.py PUBLIC_API_PATHS): liveness probes and read-only metadata.
+# The Desktop's pre-auth discovery probes hit these without any credential —
+# 401ing them at our edge breaks the "the auth method will appear once it
+# responds" flow. Mirroring hermes' own allowlist keeps the two gates aligned;
+# everything else under /gateway/* still requires the cookie or session token.
+_GATEWAY_PUBLIC_PATHS = frozenset({
+    "/api/health",
+    "/api/status",
+    "/api/config/defaults",
+    "/api/config/schema",
+    "/api/model/info",
+    "/api/dashboard/themes",
+    "/api/dashboard/plugins",
+    "/api/cron/fire",
+})
+
+
 def _gateway_edge_auth(request: Request) -> bool:
     """Shared edge auth for /gateway/*: admin cookie OR the session token.
 
     The Desktop holds no admin cookie but does know
     HERMES_DASHBOARD_SESSION_TOKEN (via Session token auth in the connection
     editor). Accept it from ?token=, the X-Hermes-Session-Token header, or an
-    Authorization: Bearer header. Fails closed when the env token is unset.
+    Authorization: Bearer *** Fails closed when the env token is unset.
+    Exception: hermes' own public API paths (liveness probes, read-only
+    metadata) pass through unauthenticated, exactly as hermes' own gate does.
     """
+    stripped = request.url.path[len("/gateway"):] if request.url.path.startswith("/gateway") else request.url.path
+    if stripped in _GATEWAY_PUBLIC_PATHS:
+        return True
     if _is_authenticated(request):
         return True
     token = request.query_params.get("token", "") or request.headers.get(
