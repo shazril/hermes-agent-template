@@ -3020,23 +3020,20 @@ async def gw_serve_route_proxy(request: Request) -> Response:
     # Strip the /gateway prefix so serve gets its expected paths
     path = request.url.path
     stripped = path[len("/gateway"):] or "/"
-
-    url = str(request.url).replace("/gateway", "", 1) if len(path) > 8 else f"{HERMES_SERVE_URL}/"
-    # Rebuild with stripped path for correctness
-    base = f"http://127.0.0.1:{HERMES_SERVE_PORT}"
-    new_scheme = "https" if request.url.scheme == "https" else "http"
-    target = url.replace(new_scheme + "://", base + "/", 1)
+    target = f"{HERMES_SERVE_URL}{stripped}"
+    if request.url.query:
+        target = f"{target}?{request.url.query}"
 
     headers = {k: v for k, v in request.headers.raw if k.lower() not in HOP_BY_HOP}
 
-    async with get_http_client() as client:
-        resp = await client.request(
-            method=request.method,
-            url=target,
-            headers=headers,
-            content=await request.body(),
-            timeout=httpx.Timeout(30.0, connect=5.0),
-        )
+    client = get_http_client()
+    resp = await client.request(
+        method=request.method,
+        url=target,
+        headers=headers,
+        content=await request.body(),
+        timeout=httpx.Timeout(30.0, connect=5.0),
+    )
     return Response(
         resp.content,
         status_code=resp.status_code,
