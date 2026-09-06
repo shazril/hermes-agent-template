@@ -3024,11 +3024,16 @@ async def gw_serve_route_proxy(request: Request) -> Response:
     if request.url.query:
         target = f"{target}?{request.url.query}"
 
-    # Forward all headers EXCEPT host (HOP_BY_HOP) — httpx sets Host from the
-    # target URL (127.0.0.1:<serve port>), which is what hermes serve's
-    # Host-header guard expects for a loopback bind. Forwarding the public
-    # Host (hermes.shazril.com) trips its "Invalid Host header" check.
-    headers = {k: v for k, v in request.headers.raw if k.lower() not in HOP_BY_HOP}
+    # Forward headers EXCEPT host/transfer-encoding. request.headers is a
+    # Headers object with STR keys/values — request.headers.raw is bytes, and
+    # the previous bytes-vs-str comparison never matched, producing a request
+    # with two Host headers (crash / upstream 400). We deliberately DROP the
+    # incoming public Host (hermes.shazril.com): hermes serve's Host guard
+    # rejects it, so we let httpx set Host from the loopback target URL.
+    headers = {
+        k: v for k, v in request.headers.items()
+        if k.lower() not in HOP_BY_HOP
+    }
     headers["host"] = f"127.0.0.1:{HERMES_SERVE_PORT}"
 
     client = get_http_client()
