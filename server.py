@@ -218,6 +218,13 @@ HERMES_DASHBOARD_HOST = "127.0.0.1"
 HERMES_DASHBOARD_PORT = int(os.environ.get("HERMES_DASHBOARD_PORT", "9119"))
 HERMES_DASHBOARD_URL = f"http://{HERMES_DASHBOARD_HOST}:{HERMES_DASHBOARD_PORT}"
 
+# Hermes serve backend — runs on loopback, proxied via /gateway/ for remote
+# Desktop connections (Settings → Gateways → Remote gateway). Bound to the
+# same port she uses internally; we proxy a path prefix so it doesn't collide
+# with the dashboard.
+HERMES_SERVE_PORT = int(os.environ.get("HERMES_SERVE_PORT", "9120"))
+HERMES_SERVE_URL = f"http://127.0.0.1:{HERMES_SERVE_PORT}"
+
 # Header hermes' own SPA uses to present its per-process session token
 # (hermes_cli/web_server.py's _SESSION_HEADER_NAME) — see
 # set_active_model_via_hermes()/_get_hermes_session_token() for why our own
@@ -1689,6 +1696,78 @@ class Dashboard:
 
 dash = Dashboard()
 
+
+# ── Hermes serve subprocess (remote gateway backend) ──────────────────────────
+class ServeManager:
+    """Manages the `hermes serve` subprocess (remote Desktop gateway).
+
+    Bound to loopback only — we expose it through our proxy on /gateway/* so
+    remote Desktops can register this instance as a "Remote gateway" connection
+    in Settings → Gateways. The serve process handles the REST API + WebSocket
+    endpoints that the Desktop app needs for chat, profiles, cron, etc.
+
+    Spawned with the same merged env as the dashboard. Output is streamed to
+    stdout with a `[serve]` prefix AND retained in a ring buffer.
+
+    This is independent of the dashboard and gateway — it just exposes hermes'
+    own serve webserver for remote connections. If someone connects via the
+    gateway, they get full control over this profile's config, sessions, tools,
+    etc. The same cookie auth that guards our admin UI also gates this path.
+    """
+
+    def __init__(self):
+        self.proc: asyncio.subprocess.Process | None = None
+        self.logs: deque[str] = deque(maxlen=300)
+        self._drain_task: asyncio.Task | None = None
+
+    async def start(self):
+        if self.proc and self.proc.returncode is None:
+            return
+        try:
+            self.proc = await asyncio.create_subprocess_exec(
+                "hermes", "serve",
+                "--host", "127.0.0.1",
+                "--port", str(HERMES_SERVE_PORT),
+                "--skip-build",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                env=build_hermes_env(),
+            )
+            print(f"[serve] spawned pid={self.proc.pid} → {HERMES_SERVE_URL}", flush=True)
+            self._drain_task = asyncio.create_task(self._drain())
+        except Exception as e:
+            print(f"[serve] FAILED to spawn: {e!r}", flush=True)
+
+    async def _drain(self):
+        """Stream subprocess output to Railway logs (prefixed) and a ring buffer."""
+        assert self.proc and self.proc.stdout
+        try:
+            async for raw in self.proc.stdout:
+                line = ANSI_ESCAPE.sub("", raw.decode(errors="replace").rstrip())
+                self.logs.append(line)
+                print(f"[serve] {line}", flush=True)
+        except Exception as e:
+            print(f"[serve] drain error: {e!r}", flush=True)
+        finally:
+            rc = self.proc.returncode if self.proc else None
+            if rc is not None and rc != 0:
+                print(f"[serve] EXITED with code {rc}", flush=True)
+            elif rc == 0:
+                print(f"[serve] exited cleanly (code 0)", flush=True)
+
+    async def stop(self):
+        if not self.proc or self.proc.returncode is not None:
+            return
+        self.proc.terminate()
+        try:
+            await asyncio.wait_for(self.proc.wait(), timeout=5)
+        except asyncio.TimeoutError:
+            self.proc.kill()
+            await self.proc.wait()
+
+
+srv = ServeManager()
+
 # Shared async HTTP client for the reverse proxy. Created lazily so we pick up
 # the running event loop, torn down in lifespan.
 _http_client: httpx.AsyncClient | None = None
@@ -2885,6 +2964,86 @@ async def route_setup_404(request: Request) -> Response:
     return Response("Not Found", status_code=404, media_type="text/plain")
 
 
+# ── Gateway serve proxy (hermes serve → remote Desktop connections) ───────────
+# Proxies all traffic from /gateway/* to the hermes serve backend. This lets
+# another Hermes Desktop register this instance as a "Remote gateway" in
+# Settings → Gateways by pointing at https://your-app-url/gateway.
+_GATEWAY_WS_PATHS = ("/api/pty", "/api/ws", "/api/events", "/api/console",
+                     "/api/plugins/*")
+
+
+async def _ws_serve_proxy(websocket: WebSocket) -> None:
+    """Reverse-proxy WebSocket from client → hermes serve backend.
+
+    Same pump pattern as ws_proxy() for the dashboard, but targets the serve
+    subprocess on port HERMES_SERVE_PORT. Strips the /gateway prefix so serve
+    sees its native paths (/api/pty, /api/ws, etc.).
+    """
+    # Accept the upgrade from the client
+    await websocket.accept()
+
+    path = websocket.url.path
+    qs = websocket.url.query or ""
+    # Strip /gateway prefix so serve sees its native path
+    stripped = path[len("/gateway"):] if path.startswith("/gateway") else path
+    upstream_url = f"ws://127.0.0.1:{HERMES_SERVE_PORT}{stripped}"
+    if qs:
+        upstream_url = f"{upstream_url}?{qs}"
+
+    try:
+        upstream = await websockets.connect(
+            upstream_url,
+            open_timeout=5,
+            ping_interval=None,  # loopback hop — don't poll
+            ping_timeout=None,
+            max_size=HERMES_WS_MAX_BYTES,
+        )
+        asyncio.create_task(_ws_pump_client_to_upstream(websocket, upstream))
+        await _ws_pump_upstream_to_client(upstream, websocket)
+    except websockets.exceptions.InvalidHandshake:
+        await websocket.close(code=503)
+    except Exception as e:
+        print(f"[gw-serve-ws] proxy error: {e!r}", flush=True)
+        try:
+            await websocket.close(code=1011)
+        except Exception:
+            pass
+    finally:
+        try:
+            await websocket.close()
+        except Exception:
+            pass
+
+
+async def gw_serve_route_proxy(request: Request) -> Response:
+    """Catch-all: forward /gateway/* requests to the hermes serve backend."""
+    # Strip the /gateway prefix so serve gets its expected paths
+    path = request.url.path
+    stripped = path[len("/gateway"):] or "/"
+
+    url = str(request.url).replace("/gateway", "", 1) if len(path) > 8 else f"{HERMES_SERVE_URL}/"
+    # Rebuild with stripped path for correctness
+    base = f"http://127.0.0.1:{HERMES_SERVE_PORT}"
+    new_scheme = "https" if request.url.scheme == "https" else "http"
+    target = url.replace(new_scheme + "://", base + "/", 1)
+
+    headers = {k: v for k, v in request.headers.raw if k.lower() not in HOP_BY_HOP}
+
+    async with get_http_client() as client:
+        resp = await client.request(
+            method=request.method,
+            url=target,
+            headers=headers,
+            content=await request.body(),
+            timeout=httpx.Timeout(30.0, connect=5.0),
+        )
+    return Response(
+        resp.content,
+        status_code=resp.status_code,
+        headers={k: v for k, v in resp.headers.items() if k.lower() != "transfer-encoding"},
+    )
+
+
 # ── App lifecycle ─────────────────────────────────────────────────────────────
 async def auto_start():
     if is_config_complete():
@@ -2913,6 +3072,10 @@ async def lifespan(app):
     # Dashboard runs always — it's the user-facing UI after setup is done,
     # and it's independent of gateway state.
     asyncio.create_task(dash.start())
+    # Hermes serve — exposed at /gateway/* so remote Desktops can connect.
+    # It needs the dashboard running first because serve's own backend talks
+    # to dashboard on loopback (the same process tree).
+    asyncio.create_task(srv.start())
     await auto_start()
     try:
         yield
@@ -2920,6 +3083,7 @@ async def lifespan(app):
         await asyncio.gather(
             gw.stop(),
             dash.stop(),
+            srv.stop(),
             return_exceptions=True,
         )
         global _http_client
@@ -3170,6 +3334,20 @@ routes = [
     # (e.g. kanban's /api/plugins/kanban/events). Prefix-matched so new plugin
     # WS endpoints in future hermes releases proxy without re-touching this list.
     WebSocketRoute("/api/plugins/{path:path}",  ws_proxy),
+
+    # ── Gateway serve proxy — remote Desktop connections ─────────────────────
+    # All traffic under /gateway/* is forwarded to the hermes serve backend.
+    # A remote Hermes Desktop registers this instance via Settings → Gateways →
+    # Remote gateway at https://your-app-url/gateway.
+    Route("/gateway/{path:path}",          gw_serve_route_proxy, methods=ANY_METHOD),
+
+    # WebSocket routes for hermes serve (Chat, sidecar, console).
+    # Order matters for WebSocketRoute — more specific paths first.
+    WebSocketRoute("/gateway/api/pty",         _ws_serve_proxy),
+    WebSocketRoute("/gateway/api/ws",           _ws_serve_proxy),
+    WebSocketRoute("/gateway/api/events",        _ws_serve_proxy),
+    WebSocketRoute("/gateway/api/console",       _ws_serve_proxy),
+    WebSocketRoute("/gateway/api/plugins/{path:path}", _ws_serve_proxy),
 
     # Root: redirect to /setup if unconfigured, otherwise proxy the dashboard.
     Route("/",                                  route_root,          methods=ANY_METHOD),
