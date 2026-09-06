@@ -1726,6 +1726,17 @@ class ServeManager:
         if self.proc and self.proc.returncode is None:
             return
         try:
+            env = build_hermes_env()
+            # Keep serve UNGATED: build_hermes_env() declares
+            # HERMES_DASHBOARD_PUBLIC_URL for the dashboard's OAuth/MCP
+            # redirects, but serve must NOT see it — a non-loopback public_url
+            # engages hermes' ticket-only auth gate (should_require_dashboard_
+            # auth) even on a loopback bind, and that gate's /api/ws path
+            # refuses session tokens outright (only browser-minted, single-use
+            # ?ticket= credentials pass). The Desktop could never connect.
+            # Serve stays loopback-bound; the trust boundary is OUR edge auth
+            # on /gateway/* (admin cookie or HERMES_DASHBOARD_SESSION_TOKEN).
+            env.pop("HERMES_DASHBOARD_PUBLIC_URL", None)
             self.proc = await asyncio.create_subprocess_exec(
                 "hermes", "serve",
                 "--host", "127.0.0.1",
@@ -1733,7 +1744,7 @@ class ServeManager:
                 "--skip-build",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
-                env=build_hermes_env(),
+                env=env,
             )
             print(f"[serve] spawned pid={self.proc.pid} → {HERMES_SERVE_URL}", flush=True)
             self._drain_task = asyncio.create_task(self._drain())
@@ -3022,6 +3033,16 @@ async def _ws_serve_proxy(websocket: WebSocket) -> None:
     # Strip /gateway prefix so serve sees its native path
     stripped = path[len("/gateway"):] if path.startswith("/gateway") else path
     upstream_url = f"ws://127.0.0.1:{HERMES_SERVE_PORT}{stripped}"
+    # Serve runs UNGATED (loopback; see ServeManager.start) — its /api/ws auth
+    # is the legacy ?token= check against ITS _SESSION_TOKEN, which comes from
+    # HERMES_DASHBOARD_SESSION_TOKEN. Headers are ignored on this leg, so
+    # inject the credential into the query string (constant-time compared by
+    # hermes' own _ws_auth_reason). If the client already sent ?token=, keep
+    # it — same value.
+    serve_token = os.environ.get("HERMES_DASHBOARD_SESSION_TOKEN", "")
+    if serve_token and "token=" not in qs:
+        sep = "&" if qs else ""
+        qs = f"{qs}{sep}token={_url_quote(serve_token)}"
     if qs:
         upstream_url = f"{upstream_url}?{qs}"
 
