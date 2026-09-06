@@ -3055,14 +3055,21 @@ async def _ws_serve_proxy(websocket: WebSocket) -> None:
     }
 
     try:
-        upstream = await websockets.connect(
-            upstream_url,
+        # websockets >= 14 renamed extra_headers -> additional_headers
+        # (removed entirely in 15.x); support both so a Dockerfile bump of the
+        # websockets pin can't silently break this hop again.
+        import inspect as _inspect
+        _ws_kwargs: dict = dict(
             open_timeout=5,
             ping_interval=None,  # loopback hop — don't poll
             ping_timeout=None,
             max_size=HERMES_WS_MAX_BYTES,
-            extra_headers=fwd_headers,
         )
+        if "additional_headers" in _inspect.signature(websockets.connect).parameters:
+            _ws_kwargs["additional_headers"] = fwd_headers or None
+        elif "extra_headers" in _inspect.signature(websockets.connect).parameters:
+            _ws_kwargs["extra_headers"] = fwd_headers
+        upstream = await websockets.connect(upstream_url, **_ws_kwargs)
     except websockets.exceptions.InvalidStatus as e:
         # serve rejected the handshake (bad/missing credentials). 4401 mirrors
         # ws_proxy's unauthenticated close so the Desktop shows an auth error
