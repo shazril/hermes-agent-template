@@ -226,6 +226,17 @@ HERMES_DASHBOARD_HOST = "127.0.0.1"
 HERMES_DASHBOARD_PORT = int(os.environ.get("HERMES_DASHBOARD_PORT", "9119"))
 HERMES_DASHBOARD_URL = f"http://{HERMES_DASHBOARD_HOST}:{HERMES_DASHBOARD_PORT}"
 
+# `hermes dashboard` needs seconds to bind that port, and Dashboard.start() only
+# SPAWNS the subprocess — nothing waits for it. Any loopback call made in that
+# window fails with "All connection attempts failed", which is why a config save
+# used to lose its provider pin and silently fall back to auto-resolution. Wait
+# this long (env-overridable, for a slow or heavily loaded host) before giving up.
+DASHBOARD_READY_TIMEOUT = float(os.environ.get("HERMES_DASHBOARD_READY_TIMEOUT", "30"))
+DASHBOARD_READY_POLL_INTERVAL = 0.5
+# A dashboard that was ALREADY running when the save landed has no cold-start
+# excuse: give it a couple of seconds, then report instead of stalling the save.
+DASHBOARD_WARM_READY_TIMEOUT = 5.0
+
 # Hermes serve backend — runs on loopback, proxied via /gateway/ for remote
 # Desktop connections (Settings → Gateways → Remote gateway). Bound to the
 # same port she uses internally; we proxy a path prefix so it doesn't collide
@@ -2195,6 +2206,48 @@ def get_http_client() -> httpx.AsyncClient:
     return _http_client
 
 
+async def wait_for_dashboard_ready(timeout: float | None = None) -> bool:
+    """Block until the dashboard answers on loopback, or the budget expires.
+
+    ``Dashboard.start()`` spawns the subprocess and returns immediately — the
+    dashboard process then takes seconds (longer on a loaded host) to bind its
+    port and start serving. Anything that talks to it inside that window fails
+    with ``All connection attempts failed``, so the provider pin in
+    ``api_config_put`` used to lose that race and silently downgrade a save to
+    hermes' auto-resolution while reporting it as unfixable.
+
+    Readiness is "it answered HTTP at all": a 401 means the process is up with
+    hermes' own auth gate engaged, which still proves the port is bound.
+    """
+    budget = DASHBOARD_READY_TIMEOUT if timeout is None else max(float(timeout), 0.0)
+    client = get_http_client()
+    started = time.monotonic()
+    deadline = started + budget
+    while True:
+        try:
+            resp = await client.get(
+                f"{HERMES_DASHBOARD_URL}/api/status",
+                timeout=httpx.Timeout(3.0, connect=0.5),
+            )
+            if resp.status_code < 500:
+                print(
+                    f"[dashboard] answered {HERMES_DASHBOARD_URL} after "
+                    f"{time.monotonic() - started:.1f}s (HTTP {resp.status_code})",
+                    flush=True,
+                )
+                return True
+        except httpx.RequestError:
+            pass
+        if time.monotonic() >= deadline:
+            print(
+                f"[dashboard] no answer on {HERMES_DASHBOARD_URL} after {budget:.0f}s — "
+                f"it may still be starting, or it exited (check for a [dashboard] EXITED line)",
+                flush=True,
+            )
+            return False
+        await asyncio.sleep(DASHBOARD_READY_POLL_INTERVAL)
+
+
 _HERMES_SESSION_TOKEN_RE = re.compile(r'__HERMES_SESSION_TOKEN__\s*=\s*"([^"]*)"')
 
 
@@ -2423,19 +2476,36 @@ async def api_config_put(request: Request):
         hermes_provider_id = HERMES_PROVIDER_IDS.get(active_provider_key)
         model_value = merged.get("LLM_MODEL", "").strip()
         if hermes_provider_id and model_value:
-            if dash.proc is None or dash.proc.returncode is not None:
+            cold_start = dash.proc is None or dash.proc.returncode is not None
+            if cold_start:
                 await dash.start()
-            pin_base_url = ""
-            pin_api_key = ""
-            if hermes_provider_id == "custom":
-                pin_base_url = (
-                    CUSTOM_STYLE_BASE_URLS.get(active_provider_key)
-                    or merged.get("CUSTOM_PROVIDER_BASE_URL", "").strip()
+            # dash.start() only spawns the process: it is not listening yet, and
+            # hermes needs seconds to bind 9119 (longer on a loaded host). Gate
+            # the pin on that instead of letting it race the cold start — that
+            # race is what produced "Could not reach the Hermes dashboard to pin
+            # <provider> (All connection attempts failed)" on a save that had in
+            # fact succeeded.
+            if not await wait_for_dashboard_ready(
+                DASHBOARD_READY_TIMEOUT if cold_start else DASHBOARD_WARM_READY_TIMEOUT
+            ):
+                model_warning = (
+                    f"Could not reach the Hermes dashboard to pin {hermes_provider_id} "
+                    f"(no answer on {HERMES_DASHBOARD_URL} within "
+                    f"{DASHBOARD_READY_TIMEOUT if cold_start else DASHBOARD_WARM_READY_TIMEOUT:.0f}s); "
+                    f"using auto-resolution instead."
                 )
-                pin_api_key = merged.get(active_provider_key, "").strip()
-            model_warning = await set_active_model_via_hermes(
-                hermes_provider_id, model_value, base_url=pin_base_url, api_key=pin_api_key
-            )
+            if model_warning is None:
+                pin_base_url = ""
+                pin_api_key = ""
+                if hermes_provider_id == "custom":
+                    pin_base_url = (
+                        CUSTOM_STYLE_BASE_URLS.get(active_provider_key)
+                        or merged.get("CUSTOM_PROVIDER_BASE_URL", "").strip()
+                    )
+                    pin_api_key = merged.get(active_provider_key, "").strip()
+                model_warning = await set_active_model_via_hermes(
+                    hermes_provider_id, model_value, base_url=pin_base_url, api_key=pin_api_key
+                )
             # Log the outcome either way. A failed pin is a SILENT downgrade —
             # hermes falls back to provider auto-resolution, which works for a
             # single-provider setup and fails opaquely for custom endpoints
