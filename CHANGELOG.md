@@ -11,6 +11,235 @@ release.
 
 ---
 
+## release/v2026.9.24/1 — October 6, 2026
+**Hermes v2026.9.24 · major (Hermes upgrade, from v2026.9.21)**
+
+### Hermes update
+- Hermes Agent **v2026.9.21 → v2026.9.24** (package 0.21.4 → 0.21.5); the native browser Chat now lets you choose a workspace for a new session.
+- **Hindsight is now a catalog plugin rather than a bundled memory provider.** This update does not delete saved settings or the memory bank. Setup shows affected deployments a notice to check each profile, install a missing plugin from the catalog, and test recall and retention. Embedded mode remains unavailable in the default root-running image.
+- **Hindsight users need a separate data backup for rollback or cloning.** The Hermes ZIP does not include external memory or embedded PostgreSQL under `/data/.pg0`; this limit predates the upgrade and is now called out in the Backup page.
+- **Bot Screen remains unavailable in this Railway image.** Browser Chat and its new workspace picker are available; the Desktop screen viewer needs a separate runtime and proxy integration.
+- **Old named-profile replies may need attention.** Hermes now records new outgoing replies in the root ledger; older unfinished replies remain in the named profile's ledger. Startup reports them and continues, so senders may need to make a new request; doing so can repeat tool actions. An unreadable ledger still stops the upgrade.
+- **Hand-written allowlists need full sender IDs.** A short entry such as `alice` no longer matches `alice@example.com`; users approved through the panel already have full IDs.
+
+### Changes to support upstream updates
+- **Existing root and named-profile configs run through Hermes' backed-up migration before startup.** Older profile instructions and the template's model setting are preserved if a migration fails; check warnings and confirm an old MCP server marked disabled now stays off under Hermes' current setting.
+- **Restore refuses an incomplete safety snapshot.** Databases in different profiles are checked by their full paths, so a same-named root database cannot hide a missing profile database.
+
+### Bug fixes
+- **Large manual backups now run as visible background jobs.** Create one from Backup & Restore, watch its phase and file count, and download the prepared ZIP in a separate request. The job and its outcome remain visible after a page reload. Prepared downloads remain available for 6 hours while the container stays up; a restart clearly marks an interrupted or unavailable job so it can be retried.
+- **Backup entries can be removed individually.** Remove clears an expired or failed entry; removing a ready backup also deletes its prepared ZIP after confirmation. A running backup or active download is protected.
+- **Unreadable config is preserved.** Save, gateway start, and xAI OAuth now report a config error instead of replacing the saved file with an empty one.
+- **Pairing approvals survive legacy folder aliases and interrupted writes.** Revoke warns when another access rule may still grant access, instead of claiming the user was blocked.
+- **Status now flags detected chat-history storage problems; Dashboard Stop stays stopped, and planned Restarts no longer count as crashes.**
+- **Runtime setup warnings now explain what survives redeploy.** Hermes packages installed on `/data` persist; provider-specific installers may still need to be run again.
+
+---
+
+## release/v2026.9.21/1 — September 23, 2026
+**Hermes v2026.9.21 · major (Hermes upgrade, from v2026.9.11)**
+
+### Hermes update
+- Hermes Agent **v2026.9.11 → v2026.9.21** (package 0.21.2 → 0.21.4).
+- **One gateway now serves every live profile on the host when the migration
+  preflight says that is safe.** The former `gateway.multiplex_profiles: false`
+  opt-out is retired. This template's `/setup` panel remains the default-profile
+  bootstrap UI; use the native Hermes dashboard's profile selector for named
+  profile configuration and pairing. Start/Stop/Restart controls the shared
+  gateway and therefore affects every served profile.
+- **Temporary provider outages recover for longer instead of ending the turn
+  immediately.** After ordinary retries and fallbacks are exhausted, Hermes now
+  performs up to five bounded recovery cycles with a visible countdown.
+- **Very large conversations compact sooner.** The default absolute compression
+  ceiling is now 256K tokens, preventing million-token contexts from growing to
+  roughly 500K before their first compaction.
+- **New capabilities:** HEIF/HEIC/AVIF image decoding, GPT-Live voice-session
+  negotiation, OpenAI-native web search through Codex OAuth, OpenRouter video
+  generation, lazy MCP startup, and n8n's official HTTP/OAuth MCP integration.
+- **The anonymous `opencode-free` provider was removed upstream** because its
+  relay now rejects external anonymous clients. Existing users must select
+  OpenCode Zen or OpenCode Go and provide that service's API key; the template
+  does not auto-migrate to a credentialed, potentially paid provider.
+- **Fresh installs show model reasoning by default.** Existing volumes keep
+  their saved `display.show_reasoning` value, normally `false`; no user setting
+  is overwritten.
+
+### Changes to support upstream updates
+- **Backup completeness now mirrors all of Hermes' exclusions.** v2026.9.21
+  excludes root/profile `browser_profiles/` plus regenerable `cache/*` trees,
+  while retaining user media and citation evidence. Without the same rules,
+  this template could reject a valid pre-restore safety snapshot because a
+  disposable database was deliberately absent.
+- **Partial manual backups remain downloadable.** Hermes now keeps a partial
+  ZIP but exits 1. The download endpoint accepts that exact result only when
+  the archive is readable, returns it with a warning, and keeps restore safety
+  snapshots fail-closed.
+- **Generic temporary files stay on ephemeral container disk.** Hermes now
+  defaults `TMPDIR`/`TMP`/`TEMP` to `$HERMES_HOME/cache/scratch`; the template
+  pins `TMPDIR=/tmp`, matching its existing terminal-scratch policy and keeping
+  disposable spools off the Railway volume.
+- **SQLite is pinned to the fixed 3.53.4 runtime used by upstream's official
+  image.** Bookworm's 3.40.1 contains the WAL-reset corruption bug and makes
+  Hermes' new FTS write-health probe fail even on a fresh database. The image
+  build now verifies the version and FTS5 trigram support before publishing.
+- **Dashboard restarts get a 15-second graceful shutdown window.** Hermes now
+  joins its SQLite reconciliation worker and closes hosted-room/Chat PTY state
+  during teardown; the former five-second wrapper deadline could SIGKILL it
+  mid-cleanup.
+- **Open Chat pages recover across a dashboard restart.** The loopback
+  dashboard token now stays stable for the wrapper process lifetime, and the
+  proxy translates Hermes' service-restart close into the reconnect signal its
+  SPA understands. Public/gated mode still mints fresh single-use WS tickets.
+
+### Verified unchanged (audited, no action)
+Exact gateway/dashboard/backup/import argv and dispatch · WebSocket routes used
+by the browser dashboard · loopback Host/Origin gates · dashboard password
+login, cookies and WS tickets · `/api/model/set` payload · pairing directory
+resolution and pending/approved schema · gateway PID/lock/socket records · exit
+codes 75/78 and container markers · Docker install-method refusal · all nine
+named install extras · `web_dist` and `HERMES_TUI_DIR` build outputs · xAI OAuth
+device flow and auth-store layout.
+
+---
+
+## release/v2026.9.11/1 — September 12, 2026
+**Hermes v2026.9.11 · major (Hermes upgrade, from v2026.8.31)**
+
+Upstream's "September decomposition" (PR #102117) split nearly every large module
+into focused files, so ~100% of the source churn is code movement. Zero files in
+`hermes_cli/`, `gateway/`, `tools/` or `agent/` are byte-identical; the findings
+below were verified by executing the new tree, not by reading the diff.
+
+### Hermes update
+- Hermes Agent **v2026.8.31 → v2026.9.11** (package 0.21.0 → 0.21.2).
+- **`session_reset` was RETIRED.** `SessionResetPolicy` is now documented as an
+  "inert legacy value type … Gateway configuration and session lifecycle do not
+  consume this datatype" (`gateway/config.py`), `default_reset_policy` went from
+  10 references in `gateway/config.py` to 0, and the key left hermes'
+  known-root-keys list. Conversations persist until an explicit `/new`/`/reset`.
+- **`sessions.auto_prune` False → True** (`config_defaults.py`), with
+  `retention_days: 90`, `min_interval_hours: 24`, `vacuum_after_prune: true`,
+  `min_vacuum_interval_days: 30`. Inherited by every existing volume through the
+  config deep-merge, with no migration and no notice. Only ENDED sessions are
+  deleted — open, pinned and mid-turn rows are never touched. **Reachability on
+  this template is narrower than the config comment implies:** the sole caller is
+  `cli.py:_run_state_db_auto_maintenance`, invoked from
+  `HermesCLI._init_session_store` (`cli.py:2862`), and `HermesCLI` is constructed
+  in exactly two places — `cli.py:4262` (the CLI entry point) and
+  `tui_gateway/slash_worker.py:111` (one worker per TUI session). Neither
+  `gateway/`, `cron/` nor `run_agent` builds it, so a deployment whose users only
+  talk to the bot over Telegram never triggers the sweep; opening the Chat tab
+  does. All knobs are config.yaml-only — there is no env-var reader for any of
+  them, so the template would have to pin it in `write_config_yaml()` (the way it
+  used to pin `session_reset`) to change the default. Left as upstream ships it:
+  there is no fresh-vs-existing divergence here (both inherit the same default),
+  and upstream reports multi-GB `state.db` growth within weeks without it.
+- **`tool_loop_guardrails.non_interactive_hard_stop_enabled: True`** (new).
+  `agent/tool_guardrails.py:_is_non_interactive_platform()` treats every platform
+  outside `{cli, tui, desktop, acp, subagent, api_server}` as unattended and
+  force-sets `hard_stop_enabled`, so a gateway turn now HALTS on a looping tool
+  (exact_failure 5, same_tool_failure 8, idempotent_no_progress 5).
+- **`plugins/web/tavily` was RESTORED** after v2026.8.31 deleted it;
+  `tools/tool_backend_helpers.py` now carries an empty `REMOVED_BACKENDS`
+  registry whose comment names the revert. `plugins/web/perplexity` and
+  `plugins/image_gen/meta-ai` are new. No plugin was removed this bump.
+- **Autodetect ladder reordered** (`tools/web_tools.py:_get_backend`): `tavily`
+  and `perplexity` now head the list, ahead of `exa`/`parallel`/`keenable`. Only
+  reached on a never-configured install; a stored selection is still returned
+  strictly.
+- **`hermes_startup_watchdog.py` (new).** Armed at import for the adjacent argv
+  pair `gateway run` — our exact spawn — it dumps all-thread stacks and
+  `os._exit(75)`s a gateway that has not reached a live event loop in 300s. 75 is
+  the planned-restart code this supervisor already respawns on, so a pre-loop
+  wedge now self-heals. Not armed for `dashboard`/`backup`/`import`.
+- **`is_global_startup_conflict()` (new, `gateway/restart.py`).** A
+  `<scope>_lock` / `lock_conflict` fatal error is emitted `retryable=True` for
+  mid-run reconnects but is now forced NON-retryable at startup
+  (`run_startup.py:1099`). With `connected_count == 0` — a single-platform
+  deployment, this template's typical shape — that exits **78**, which
+  `Gateway._drain()` deliberately never respawns. Previously it retry-queued and
+  self-healed.
+- **`$HERMES_HOME/shared-state.db` (new).** `gateway/hosted_rooms.py`
+  `default_db_path()` moved off `state.db`; the worker is awaited inline at every
+  gateway start, so the file exists on every deployment. Confirmed live: absent
+  on v2026.8.31, present on v2026.9.11. Existing Group Chat state is NOT migrated.
+- **`hermes backup` gained `-k/--keep` (default 3)** which DELETES older
+  `hermes-backup-*.zip` in the output directory. Both template call sites use
+  names that do not match that prefix, so the sweep is inert here.
+- **Plugin-import compat layer expires 2026-09-14.** `hermes_cli/plugin_compat.py`
+  compares `date.today()`, so a pinned image changes behaviour by calendar date.
+  `plugins_loader.py` then refuses to load an EXTERNAL plugin whose source
+  imports a moved internal path; bundled plugins are exempt
+  (`_scan_root` returns None for `source == "bundled"`). Escape hatch:
+  `plugins.allow_deprecated_imports: true`.
+
+### Changes to support upstream updates
+- `Dockerfile`: `ARG HERMES_REF` → `v2026.9.11`. Also re-dated the
+  `--exclude-newer` escape-hatch floor: `nemo-relay` moved `>=0.7.1` (2026-08-07)
+  → `>=0.8.3,<0.9` (0.8.3 published 2026-09-02), so the documented recovery
+  procedure would have failed as written.
+- `server.py` `ENV_VARS` + `templates/index.html`: **`TAVILY_API_KEY` restored**
+  (optional — Tavily works keyless once selected) and **`PERPLEXITY_API_KEY`
+  added** (required; no keyless tier).
+- `server.py` `write_config_yaml()`: dropped the `session_reset.mode = "both"`
+  pin. Unknown top-level keys are deliberately un-warned upstream, so it would
+  have failed silently as a dead key on disk.
+- `server.py` `_BACKUP_EXCLUDED_ROOT_DIRS` + `_in_excluded_root_dir()` (new):
+  mirrors upstream's **second** exclusion mechanism (`_EXCLUDED_ROOT_DIRS` +
+  `_in_excluded_root_dir`, `hermes_cli/backup.py`), which skips `models`,
+  `runtimes` and `node` only at the root of `HERMES_HOME` and at
+  `profiles/<name>/`. Root-scoped, not flat — `skills/foo/models/` must still be
+  backed up. Without the mirror a `*.db` under any of the three is demanded by
+  `_live_db_names()` while `hermes backup` omits it, and the false "incomplete"
+  ABORTS a restore. Unit-tested against upstream's own function across 14 paths.
+- `server.py` `build_hermes_env()`: `HERMES_GATEWAY_LOCK_DIR=/tmp/hermes-gateway-locks`
+  (`setdefault`). Hermes' per-token locks are machine-local by intent but default
+  to `$HOME/.local/state/hermes/gateway-locks`, and `HOME=/data` puts them on the
+  volume where they outlive a redeploy — `start.sh` only sweeps
+  `gateway.pid`/`.lock`/`.sock`. With the new exit-78 rule above, a stale token
+  lock is no longer a recoverable state, so it must not be able to persist.
+
+### Bug fixes
+- **The crash-loop guard could never fire on a slow loop.** `_supervise_respawn`
+  pruned `_recent_exits` on a fixed 120s window and needed 5 entries, so any
+  failure cycle slower than ~24s dropped its own history every boot and the
+  counter never advanced — the exact defect upstream names in its new
+  `gateway/restart_loop_guard.py`. v2026.9.11's 300s startup watchdog makes that
+  reachable: respawn every 5 minutes, forever, with Status reading "running".
+  Added `RESPAWN_CHAIN_GAP_S` / `RESPAWN_CHAIN_UPTIME_S` / `RESPAWN_MAX_CHAIN`,
+  which chain exits that are both close together AND short-lived. Simulated
+  across 8 scenarios: fast loops still trip at 6 exits, the 300s loop now trips
+  at 9, and healthy patterns (daily crash, hourly `/restart`, 12-minute manual
+  restarts) never trip. A give-up now also `print()`s to `railway logs`.
+
+### Housekeeping
+- Documented, at both `hermes backup` call sites, that only the output filename
+  keeps the new `--keep 3` auto-prune inert.
+- `README.md`: pinned version ×2 and the supported-tools list.
+
+### Verified unchanged (audited, no action)
+Install extras (all 9 still exist; resolve executed on x86_64 and aarch64) ·
+subprocess argv (all five parsed against the real `_build_cli_parser`, with a
+negative control) · the WebSocket route set (enumerated from the live
+`app.routes` on both tags — 7 unique paths, identical) · `HOP_BY_HOP`
+host-stripping and the loopback Host gate · the auth gate, `resolve_public_url`
+and the four `HERMES_DASHBOARD_BASIC_AUTH_*` keys · `ws_max_size` 384 MiB and
+loopback `ws_ping_interval=None` · pairing directory resolution and the
+pending/approved JSON schema (agreement re-proved inside the container on a
+fresh volume) · `gateway.pid`/`.lock`/`.sock`, exit codes 75/78, container
+markers · `detect_install_method` precedence and the Update-button refusal ·
+`_EXCLUDED_DIRS`, `_IMPORT_SKIP_NAMES`, `_validate_backup_zip`, the `--force`
+prompt · `HERMES_SUPERVISED_CHILD`, `HERMES_GATEWAY_MAX_STARTS`,
+`HERMES_RESTART_AFTER_TURN_TIMEOUT`, `TERMINAL_TEMP_DIR` precedence ·
+`firecrawl-anydoc==0.2.4` agreeing in core deps and `tools/lazy_deps.py` ·
+`_POST_SETUP_INSTALLED` (still only `cua_driver`) · `_PROFILE_MANAGED_ENV_KEYS`
+(still the 6 ACP/Copilot keys) · `KNOWN_PROVIDER_KEY_PREFIXES` ·
+`web_dist` outDir, `HERMES_TUI_DIR`, node/npm engines · `cron_drain_timeout` 30,
+`gateway_startup_warmup_timeout` 20, `gateway_turn_lease_timeout` 5 · bundled
+skills (none removed).
+
+---
+
 ## release/v2026.8.31/1 — September 6, 2026
 **Hermes v2026.8.31 · major (Hermes upgrade, from v2026.8.27)**
 
