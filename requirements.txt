@@ -16,6 +16,7 @@ rich
 croniter>=6.0.0
 psutil>=7.0.0
 pydantic>=2.10.0
+openai>=2.0.0
 # ptyprocess powers hermes's POSIX /api/pty bridge for embedded dashboard chat.
 # Upstream pyproject guards it with python_version >= '3.14', so Docker/Python 3.12
 # installs skip it unless explicitly declared here.
