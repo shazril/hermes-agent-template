@@ -94,7 +94,7 @@ ENV HERMES_REF=${HERMES_REF}
 # `node >=22.22.0` + `npm <11.10.0 || >=11.17.0` is now a hard EBADENGINE build
 # failure, not a warning — setup_24.x bundles an npm that satisfies neither.
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends curl ca-certificates git tini && \
+    apt-get install -y --no-install-recommends curl ca-certificates git tini ripgrep ffmpeg libatomic1 procps && \
     curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
     apt-get install -y --no-install-recommends nodejs && \
     rm -rf /var/lib/apt/lists/*

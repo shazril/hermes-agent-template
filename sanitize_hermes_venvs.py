@@ -200,6 +200,38 @@ def sanitize_all(hermes_home: Path, target_pyver: tuple[int, int] | None = None)
     if check_and_clean_lazy_packages(lazy_dir, target_pyver):
         cleaned.append(str(lazy_dir))
 
+    # 4. Tools directory (if tools/facts.json or python binary has incompatible python)
+    tools_dir = hermes_home / "tools"
+    if tools_dir.is_dir():
+        tools_facts = tools_dir / "facts.json"
+        should_clean_tools = False
+        if tools_facts.is_file():
+            try:
+                content = tools_facts.read_text(encoding="utf-8", errors="ignore")
+                target_tag = f"python{target_pyver[0]}.{target_pyver[1]}"
+                for py_maj in range(3, 4):
+                    for py_min in range(8, 20):
+                        tag = f"python{py_maj}.{py_min}"
+                        if tag in content and tag != target_tag:
+                            should_clean_tools = True
+                            break
+                    if should_clean_tools:
+                        break
+            except OSError:
+                pass
+        if should_clean_tools:
+            print(f"[sanitize-venvs] Pruning incompatible PM tools at {tools_dir}", flush=True)
+            for child in list(tools_dir.iterdir()):
+                if child.name.startswith("python") or child.name in ("facts.json", ".install.lock"):
+                    if child.is_dir() and not child.is_symlink():
+                        shutil.rmtree(child, ignore_errors=True)
+                    else:
+                        try:
+                            child.unlink()
+                        except OSError:
+                            pass
+            cleaned.append(str(tools_dir))
+
     return cleaned
 
 
