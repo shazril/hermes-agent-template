@@ -13,3 +13,6 @@ pyyaml
 ruamel.yaml
 python-dotenv
 rich
+croniter>=6.0.0
+psutil>=7.0.0
+pydantic>=2.10.0
