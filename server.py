@@ -2013,6 +2013,7 @@ class Dashboard:
                 "--host", HERMES_DASHBOARD_HOST,
                 "--port", str(HERMES_DASHBOARD_PORT),
                 "--no-open",
+                "--isolated",
                 # --skip-build: the Dockerfile pre-builds the React dashboard
                 # into hermes_cli/web_dist/ at image time. This flag tells
                 # hermes to trust that dist and skip its npm build check,
@@ -2139,6 +2140,7 @@ class ServeManager:
                 "--host", "127.0.0.1",
                 "--port", str(HERMES_SERVE_PORT),
                 "--skip-build",
+                "--isolated",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 env=env,
@@ -2197,38 +2199,30 @@ _HERMES_SESSION_TOKEN_RE = re.compile(r'__HERMES_SESSION_TOKEN__\s*=\s*"([^"]*)"
 
 
 async def _get_hermes_session_token() -> str:
-    """Scrape the dashboard's own ephemeral session token from its SPA shell.
+    """Return the session token for server-to-server calls to the dashboard.
 
     Hermes gates every non-public ``/api/*`` route behind a per-process
     random ``_SESSION_TOKEN`` — a legacy check in hermes_cli/web_server.py's
     ``auth_middleware`` that's SEPARATE from (and still active alongside) the
     OAuth gate that invariant 3 already covers. Loopback bind only turns off
     the OAuth gate (``auth_required``); it does not exempt this token check.
-    A tokenless call like a plain server-to-server POST 401s unconditionally.
 
-    The only way to obtain a valid token without a browser is the same way
-    the SPA itself does: on a loopback (ungated) bind, hermes injects it into
-    every served HTML shell as ``window.__HERMES_SESSION_TOKEN__="..."``
-    (hermes_cli/web_server.py's ``_serve_index``). That HTML-serving catch-all
-    route is not under ``/api/``, so it is never itself gated — no chicken-
-    and-egg problem. Not cached: cheap (one loopback GET), and self-heals
-    across a dashboard restart (which rotates the token) without needing
-    invalidation logic. Re-verify the injected variable name against
-    hermes_cli/web_server.py on a Hermes version bump — if it's ever renamed
-    or removed, this degrades to the pre-existing "no token" 401 handled
-    below, not a crash.
+    Because build_dashboard_env() explicitly supplies HERMES_DASHBOARD_SESSION_TOKEN,
+    the dashboard subprocess uses _DASHBOARD_SESSION_TOKEN directly. We return
+    it without an unnecessary round-trip. On ungated binds where it might not
+    be preset, we fall back to scraping it from the SPA HTML shell.
     """
+    if _DASHBOARD_SESSION_TOKEN:
+        return _DASHBOARD_SESSION_TOKEN
     client = get_http_client()
-    resp = await client.get(f"{HERMES_DASHBOARD_URL}/", timeout=httpx.Timeout(10.0))
-    if resp.status_code != 200:
-        # Gated mode (invariant 8): `/` 302s to the login page, so there is no
-        # SPA shell and no token to scrape. Callers authenticate with the
-        # HermesSession cookies instead. Returning "" rather than raising keeps
-        # that a normal path — raise_for_status() here made every provider pin
-        # fail with "Could not fetch a Hermes session token".
+    try:
+        resp = await client.get(f"{HERMES_DASHBOARD_URL}/", timeout=httpx.Timeout(10.0))
+        if resp.status_code != 200:
+            return ""
+        match = _HERMES_SESSION_TOKEN_RE.search(resp.text)
+        return match.group(1) if match else ""
+    except (httpx.ConnectError, httpx.ConnectTimeout):
         return ""
-    match = _HERMES_SESSION_TOKEN_RE.search(resp.text)
-    return match.group(1) if match else ""
 
 
 async def set_active_model_via_hermes(
@@ -2303,15 +2297,23 @@ async def set_active_model_via_hermes(
         )
 
     generation, session = hermes_session.snapshot()
-    try:
-        resp = await _post(session)
-        if resp.status_code == 401 and await hermes_session.refresh(generation):
-            _, session = hermes_session.snapshot()
+    resp = None
+    for attempt in range(4):
+        try:
             resp = await _post(session)
-    except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout) as e:
-        return f"Could not reach the Hermes dashboard to pin {provider_id} ({e}); using auto-resolution instead."
-    except httpx.RequestError as e:
-        return f"Hermes model/set request failed ({e}); using auto-resolution instead."
+            if resp.status_code == 401 and await hermes_session.refresh(generation):
+                _, session = hermes_session.snapshot()
+                resp = await _post(session)
+            break
+        except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+            if attempt < 3:
+                await asyncio.sleep(1.0)
+                continue
+            return f"Could not reach the Hermes dashboard to pin {provider_id} ({e}); using auto-resolution instead."
+        except httpx.ReadTimeout as e:
+            return f"Could not reach the Hermes dashboard to pin {provider_id} ({e}); using auto-resolution instead."
+        except httpx.RequestError as e:
+            return f"Hermes model/set request failed ({e}); using auto-resolution instead."
 
     if resp.status_code != 200:
         return f"Hermes rejected the {provider_id} model/provider pin (HTTP {resp.status_code}); using auto-resolution instead."
@@ -2421,6 +2423,8 @@ async def api_config_put(request: Request):
         hermes_provider_id = HERMES_PROVIDER_IDS.get(active_provider_key)
         model_value = merged.get("LLM_MODEL", "").strip()
         if hermes_provider_id and model_value:
+            if dash.proc is None or dash.proc.returncode is not None:
+                await dash.start()
             pin_base_url = ""
             pin_api_key = ""
             if hermes_provider_id == "custom":
