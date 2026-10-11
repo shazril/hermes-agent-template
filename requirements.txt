@@ -17,8 +17,31 @@ croniter>=6.0.0
 psutil>=7.0.0
 pydantic>=2.10.0
 openai>=2.0.0
-# ptyprocess powers hermes's POSIX /api/pty bridge for embedded dashboard chat.
-# Upstream pyproject guards it with python_version >= '3.14', so Docker/Python 3.12
-# installs skip it unless explicitly declared here.
 ptyprocess>=0.7.0; sys_platform != 'win32'
+
+# Upstream hermes-agent core dependencies.
+# Upstream pyproject guards core deps with python_version >= '3.14', so Python 3.12
+# container builds skip them unless explicitly declared here.
+fastapi>=0.104.0
+fire>=0.7.1
+prompt_toolkit>=3.0.52
+tenacity>=9.1.4
+packaging>=26.0
+snowballstemmer>=3.1.1
+Markdown>=3.10.2
+PyJWT[crypto]>=2.13.0
+requests>=2.33.0
+truststore>=0.10.4
+tomli-w>=1.2.0
+firecrawl-anydoc>=0.2.4
+Pillow>=10.0.0
+pillow-heif>=1.4.0
+resvg-py>=0.4.0
+browser-harness>=0.1.13
+pathspec>=1.1.1
+watchfiles>=0.20
+httptools>=0.6.3
+cryptography>=50.0.0
+urllib3>=2.7.0
+
 
