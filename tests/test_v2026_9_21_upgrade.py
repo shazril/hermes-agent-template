@@ -425,6 +425,7 @@ class RouterProviderEndpointTests(UpgradeServerMixin, unittest.IsolatedAsyncioTe
     def setUp(self):
         super().setUp()
         self.server.guard = lambda _request: None
+        self.server.wait_for_dashboard_ready = AsyncMock(return_value=True)
 
     async def test_save_pins_named_router_without_putting_secret_in_request(self):
         class Request:

@@ -54,6 +54,12 @@ fi
 mkdir -p /data/.hermes/lazy-packages
 export HERMES_LAZY_INSTALL_TARGET=/data/.hermes/lazy-packages
 
+# Sanitize incompatible Python virtual environments left on the volume by a
+# different Python runtime (e.g. Python 3.14 on a host system or earlier build).
+# Without this, hermes_bootstrap activates the old venv on sys.path, and Python
+# fails with ModuleNotFoundError when loading binary extensions (pydantic-core).
+python /app/sanitize_hermes_venvs.py --hermes-home /data/.hermes
+
 # v2026.9.21 could leave a named profile's outgoing final reply in that
 # profile's state.db while the shared gateway's boot recovery checked the root
 # ledger. v2026.9.24 fixes new writes but does not replay those old rows. They

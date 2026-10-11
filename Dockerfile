@@ -195,6 +195,7 @@ RUN mkdir -p /data/.hermes
 COPY server.py /app/server.py
 COPY migrate_hermes_configs.py /app/migrate_hermes_configs.py
 COPY check_pending_deliveries.py /app/check_pending_deliveries.py
+COPY sanitize_hermes_venvs.py /app/sanitize_hermes_venvs.py
 COPY templates/ /app/templates/
 COPY start.sh /app/start.sh
 RUN chmod +x /app/start.sh
